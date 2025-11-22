@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# svn-log  —  “svn log” with automatic paging
+#
+# Usage examples
+#   svn-log                    # full log, paged
+#   svn-log -l 20              # last 20 revisions, paged
+#   svn-log -r 1500:HEAD file  # log for one file, paged
+#
+# Notes
+# • All arguments are forwarded untouched to `svn log`.
+# • If stdout isn’t a terminal (e.g., you pipe into grep), the script
+#   disables paging so it behaves exactly like `svn log`.
+
+# Forward args to svn log and page only when writing to a tty
+if [[ -t 1 ]]; then
+    svn log "$@" | less -F -R -S
+else
+    svn log "$@"
+fi
+

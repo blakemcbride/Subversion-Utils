@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+#  svn-tag  —  tag / switch / delete / diff helper for Subversion
+#  last updated 2025-11-22
+#
+#  Modes (choose one):
+#    -c <tag>            create <tag> from current trunk/branch/tag
+#    -s <tag>            switch working copy to <tag>
+#    -t                  switch working copy to trunk
+#    -d <tag>            delete remote tag <tag> (prompts)
+#    --diff A B          diff refs A and B (each: trunk | tag)
+#    (no option)         list trunk and tags
+#
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+shopt -s extglob
+
+die() { echo "svn-tag: $*" >&2; exit 1; }
+
+SCRIPT_FILE="${BASH_SOURCE[0]}"
+SCRIPT_FILE="$(readlink -f -- "$SCRIPT_FILE")"
+
+usage() {
+  awk '
+    /^# -/ { if(seen){exit}; seen=1; next }
+    seen && /^#/ { sub(/^# ?/,""); print }
+  ' "$SCRIPT_FILE"
+}
+
+##############################################################################
+#  Locate repository context (parallel to svn-branch)
+##############################################################################
+REPO_ROOT=$(svn info --show-item repos-root-url 2>/dev/null) \
+  || die "Not an SVN working copy."
+WC_URL=$(svn info --show-item url)
+WC_PATH=$PWD
+
+if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+  TAGS_URL="${WC_URL%%/trunk*}/tags"
+elif [[ "$WC_URL" =~ (/tags)(/|$) ]]; then
+  TAGS_URL="${WC_URL%%/tags/*}/tags"
+elif [[ "$WC_URL" =~ (/branches)(/|$) ]]; then
+  TAGS_URL="${WC_URL%%/branches/*}/tags"
+else
+  TAGS_URL="${REPO_ROOT}/tags"
+fi
+
+# Canonical trunk URL
+if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+  TRUNK_URL="${WC_URL%%/trunk*}/trunk"
+elif [[ "$WC_URL" =~ (/branches)(/|$) ]]; then
+  TRUNK_URL="${WC_URL%%/branches/*}/trunk"
+elif [[ "$WC_URL" =~ (/tags)(/|$) ]]; then
+  TRUNK_URL="${WC_URL%%/tags/*}/trunk"
+else
+  TRUNK_URL="${REPO_ROOT}/trunk"
+fi
+
+CURRENT_TAG=""
+[[ "$WC_URL" =~ /tags/([^/]+) ]] && CURRENT_TAG="${BASH_REMATCH[1]}"
+
+# Map "trunk" or tag name -> URL (validates)
+ref_to_url() {
+  local ref="$1" url
+  if [[ "$ref" == "trunk" ]]; then
+    url="$TRUNK_URL"
+  else
+    url="${TAGS_URL}/${ref}"
+  fi
+  svn info "$url" &>/dev/null \
+    || die "Ref '$ref' not found at $url."
+  printf '%s\n' "$url"
+}
+
+##############################################################################
+#  Option parsing
+##############################################################################
+CREATE=0 SWITCH=0 TRUNK=0 DELETE=0 DIFF=0
+NEW="" SW="" DEL=""
+DA="" DB=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -c) CREATE=1; [[ ${2:-} ]] || die "-c needs a tag name"; NEW=$2; shift ;;
+    -s) SWITCH=1; [[ ${2:-} ]] || die "-s needs a tag name"; SW=$2; shift ;;
+    -t|--trunk) TRUNK=1 ;;
+    -d) DELETE=1; [[ ${2:-} ]] || die "-d needs a tag name"; DEL=$2; shift ;;
+    --diff)
+      DIFF=1
+      [[ ${2:-} && ${3:-} ]] || die "--diff needs two refs"
+      DA=$2; DB=$3; shift 2 ;;
+    *) die "Unknown option '$1'. See -h." ;;
+  esac
+  shift
+done
+
+(( CREATE + SWITCH + TRUNK + DELETE + DIFF <= 1 )) \
+  || die "Choose only one main mode."
+
+##############################################################################
+#  Clean working copy helper
+##############################################################################
+require_clean_wc() {
+  local dirty
+  dirty=$(svn status)
+  if [[ -n "$dirty" ]]; then
+    echo "Working copy not clean:" >&2
+    echo "$dirty" >&2
+    die "Commit/revert first."
+  fi
+}
+
+##############################################################################
+#  TRUNK mode
+##############################################################################
+if (( TRUNK )); then
+  require_clean_wc
+  if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+    echo "Already on trunk."
+  else
+    svn switch "$TRUNK_URL" "$WC_PATH" || die "switch failed"
+    echo "Now on trunk."
+  fi
+  exit 0
+fi
+
+##############################################################################
+#  SWITCH mode
+##############################################################################
+if (( SWITCH )); then
+  DEST="${TAGS_URL}/${SW}"
+  svn info "$DEST" &>/dev/null || die "Tag '$SW' does not exist."
+  require_clean_wc
+  svn switch "$DEST" "$WC_PATH" || die "switch failed"
+  echo "Now on tag '$SW'."
+  exit 0
+fi
+
+##############################################################################
+#  CREATE mode
+##############################################################################
+if (( CREATE )); then
+  DEST="${TAGS_URL}/${NEW}"
+  svn info "$DEST" &>/dev/null && die "Tag '$NEW' already exists."
+  require_clean_wc
+  svn copy "$WC_URL" "$DEST" -m "Create tag $NEW" \
+    || die "svn copy failed"
+  svn switch "$DEST" "$WC_PATH" || die "switch failed"
+  echo "Created and switched to tag '$NEW'."
+  exit 0
+fi
+
+##############################################################################
+#  DELETE mode
+##############################################################################
+if (( DELETE )); then
+  [[ "$DEL" != "trunk" ]] || die "Refusing to delete trunk."
+  DEST="${TAGS_URL}/${DEL}"
+  svn info "$DEST" &>/dev/null || die "Tag '$DEL' does not exist."
+
+  if [[ "$CURRENT_TAG" == "$DEL" ]]; then
+    require_clean_wc
+    echo "You are currently on tag '$DEL'."
+    read -rp "Switch to trunk first? [y/N] " yn
+    [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+    svn switch "$TRUNK_URL" "$WC_PATH" || die "switch failed"
+    echo "Switched to trunk."
+  fi
+
+  read -rp "Delete tag '$DEL'? [y/N] " yn
+  [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+  svn delete "$DEST" -m "Delete tag $DEL" || die "delete failed"
+  echo "Deleted tag '$DEL'."
+  exit 0
+fi
+
+##############################################################################
+#  DIFF mode
+##############################################################################
+if (( DIFF )); then
+  URL_A=$(ref_to_url "$DA")
+  URL_B=$(ref_to_url "$DB")
+  if [[ "$URL_A" == "$URL_B" ]]; then
+    echo "Both refs resolve to same URL:"
+    echo "  $URL_A"
+    exit 0
+  fi
+  echo "Diff between '$DA' and '$DB':"
+  echo "  $URL_A"
+  echo "  $URL_B"
+  svn diff "$URL_A" "$URL_B" || die "diff failed"
+  exit 0
+fi
+
+##############################################################################
+#  LIST mode (default)
+##############################################################################
+CURRENT_URL=$(svn info --show-item url 2>/dev/null || true)
+CURRENT_REF=""
+
+if [[ -n "$CURRENT_URL" ]]; then
+  NURL=${CURRENT_URL%/}
+  NTAGS=${TAGS_URL%/}
+
+  if [[ "$NURL" == "${NTAGS%/tags}/trunk" ]]; then
+    CURRENT_REF="trunk"
+  elif [[ "$NURL" == "$NTAGS"/* ]]; then
+    CURRENT_REF=${NURL#"$NTAGS"/}
+    CURRENT_REF=${CURRENT_REF%%/*}
+  fi
+fi
+
+echo "Tags in $TAGS_URL:"
+
+# trunk
+if [[ "$CURRENT_REF" == "trunk" ]]; then
+  echo "trunk *"
+else
+  echo "trunk"
+fi
+
+# tags
+svn ls "$TAGS_URL" 2>/dev/null \
+  | sed 's:/*$::' \
+  | while read -r T; do
+      [[ -z "$T" ]] && continue
+      if [[ "$T" == "$CURRENT_REF" ]]; then
+        echo "$T *"
+      else
+        echo "$T"
+      fi
+    done

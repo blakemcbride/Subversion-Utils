@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+##############################################################################
+#  svn-sync  —  Bring the working copy’s schedule in sync with the filesystem
+#
+#  Actions performed
+#    1. Schedule every unversioned file/dir for addition
+#    2. Schedule every missing (locally deleted) file/dir for deletion
+#
+#  Usage
+#      svn-sync             # add new files + delete missing ones
+#      svn-sync -n          # dry-run (show what would be done)
+#      svn-sync -h          # help
+#
+#  After running, commit the scheduled changes:
+#      svn commit -m "Synchronise working copy with filesystem"
+##############################################################################
+
+set -euo pipefail
+
+# ────────────────────────────────────────────────────────────────────────────
+show_help() {
+cat <<'EOF'
+svn-sync  —  Make working copy schedule match the current filesystem.
+
+Adds:
+  * Any file or directory under the current working copy that is not yet
+    versioned (honours auto-props).
+
+Deletes:
+  * Any versioned file or directory that no longer exists on disk.
+
+Options
+  -n      Dry-run. Show what would be added / deleted but do not schedule.
+  -h      Show this help and exit.
+
+Typical workflow
+  svn-sync           # stage adds & deletes
+  svn status         # review
+  svn commit -m "Sync WC with filesystem"
+EOF
+}
+
+# ─── option parsing ─────────────────────────────────────────────────────────
+DRY_RUN=false
+while getopts ":nh" opt; do
+  case "$opt" in
+    n) DRY_RUN=true ;;
+    h) show_help; exit 0 ;;
+    \?) echo "svn-sync: unknown option -$OPTARG" >&2; exit 1 ;;
+  esac
+done
+
+# ─── 1) schedule unversioned items for addition ────────────────────────────
+if $DRY_RUN; then
+  echo "Would add:"
+  svn status --no-ignore | awk '/^\?/ {print "  " $2}'
+else
+  svn add . --force --depth infinity --auto-props
+fi
+
+# ─── 2) schedule missing items for deletion ────────────────────────────────
+MISSING=$(svn status | awk '/^!/ {print $2}')
+if [[ -n "$MISSING" ]]; then
+  if $DRY_RUN; then
+    echo "Would delete:"
+    printf '  %s\n' $MISSING
+  else
+    printf '%s\n' $MISSING | xargs -r svn delete
+  fi
+fi
+
+if $DRY_RUN; then
+  echo -e "\nDry-run complete. Nothing was modified."
+else
+  echo -e "\nScheduling complete. Review with 'svn status', then commit."
+fi
+

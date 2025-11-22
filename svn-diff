@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+#  svn-diff — pager-friendly wrapper around “svn diff”
+#
+#  Features
+#    • Sends the diff through less (-F -R -S) when stdout is a terminal.
+#    • If exactly one argument looks like a single revision (12345 or r12345)
+#      it is treated as “-c <REV>”.
+#    • -h / --help prints this help text and exits cleanly.
+#
+#  Quick examples
+#    svn-diff                     diff working copy, paged
+#    svn-diff 10572               patch for r10572        (implicit -c)
+#    svn-diff -c 10572            patch for r10572        (explicit)
+#    svn-diff -r 120:125          all changes between r120 and r125
+#    svn-diff -r PREV:HEAD .      diff between last commit and HEAD
+#    svn-diff -h                  show help
+#
+#  less flags
+#    -F  quit if output fits on one screen
+#    -R  pass ANSI colour codes through
+#    -S  disable line wrapping (scroll horizontally)
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+##############################################################################
+#  Helper: show help and exit
+##############################################################################
+show_help() {
+  cat <<'EOF'
+svn-diff — pager-friendly wrapper around “svn diff”
+
+USAGE
+  svn-diff [svn diff options]               # behaves like svn diff, but paged
+  svn-diff REV                              # same as: svn diff -c REV
+  svn-diff -h | --help                      # show this help
+
+VIEWING RANGES OF REVISIONS
+  To see changes between multiple consecutive revisions, use the standard
+  Subversion range syntax with -r:
+
+      svn-diff -r <START>:<END> [PATH]
+
+  Examples
+      svn-diff -r 120:125           # cumulative diff from r120 → r125
+      svn-diff -r PREV:HEAD .       # changes since the previous commit
+      svn-diff -r 0:HEAD file.txt   # full history of one file
+
+FEATURES
+  • Sends output through “less -F -R -S” when writing to a TTY.
+  • A lone numeric argument (optionally prefixed with “r”) is treated as
+    a single-revision diff:   svn-diff 10572  ≡  svn diff -c 10572
+  • All other arguments are passed unchanged to “svn diff”.
+
+EOF
+}
+
+##############################################################################
+#  Detect -h / --help
+##############################################################################
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+  esac
+done
+
+##############################################################################
+#  Implicit “-c REV” when a single numeric argument is supplied
+##############################################################################
+if [[ $# -eq 1 && "$1" != -* && "$1" =~ ^r?[0-9]+$ ]]; then
+  rev=${1#r}           # strip leading 'r' if present
+  set -- -c "$rev"
+fi
+
+##############################################################################
+#  Run svn diff, paging only when stdout is a terminal
+##############################################################################
+if [[ -t 1 ]]; then
+  svn diff "$@" | less -F -R -S
+else
+  svn diff "$@"
+fi
+

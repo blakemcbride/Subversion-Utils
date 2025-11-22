@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+#  svn-new  —  Initialise a new project layout in an SVN repository
+#
+#  Creates, in one atomic commit:
+#      <URL>/trunk
+#      <URL>/branches
+#      <URL>/tags
+#
+#  Usage
+#      svn-new [-m "Log message"] <REPO-URL>
+#
+#  Examples
+#      svn-new https://svn.example.com/svn/myproject
+#      svn-new -m "Set up skeleton" \
+#              https://svn.example.com/svn/company/finance
+#
+#  Options
+#      -m MSG    Commit log message (default: "Initial project layout")
+#      -h, --help  Show this help and exit.
+#
+#  Notes
+#    • Uses one `svn mkdir --parents` so all three directories are created
+#      in a single revision.
+#    • Aborts if *any* of trunk/branches/tags already exist.
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+##############################################################################
+#  Help message
+##############################################################################
+show_help() {
+  awk '
+    NR==1 {next}                    # skip the shebang
+    /^set -euo/ {exit}              # stop before the first non-comment code
+    /^#/ {
+      sub(/^# ?/, "")
+      print
+    }' "$0"
+}
+
+##############################################################################
+#  Parse options
+##############################################################################
+LOG_MSG="Initial project layout"
+
+while getopts ":m:h-:" opt; do
+  case "$opt" in
+    m) LOG_MSG=$OPTARG ;;
+    h) show_help; exit 0 ;;
+    -) case "$OPTARG" in
+         help) show_help; exit 0 ;;
+         *)    echo "svn-new: invalid option --$OPTARG" >&2; exit 1 ;;
+       esac ;;
+    \?) echo "svn-new: unknown option -$OPTARG" >&2; show_help; exit 1 ;;
+  esac
+done
+shift $((OPTIND-1))
+
+[[ $# -eq 1 ]] || { show_help; exit 1; }
+BASE_URL=$1
+
+##############################################################################
+#  Sanity checks — abort if any sub-directory already exists
+##############################################################################
+for sub in trunk branches tags; do
+  if svn info "${BASE_URL}/${sub}" &>/dev/null; then
+    echo "svn-new: '${BASE_URL}/${sub}' already exists — aborting." >&2
+    exit 1
+  fi
+done
+
+##############################################################################
+#  Create layout
+##############################################################################
+echo "Creating project layout under ${BASE_URL} …"
+svn mkdir --parents \
+  "${BASE_URL}/trunk" \
+  "${BASE_URL}/branches" \
+  "${BASE_URL}/tags" \
+  -m "${LOG_MSG}"
+
+echo "✅  Done."
+echo "    ${BASE_URL}/trunk"
+echo "    ${BASE_URL}/branches"
+echo "    ${BASE_URL}/tags"
+

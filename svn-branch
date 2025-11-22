@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+#  svn-branch  —  branch / switch / merge / pull / diff helper for Subversion
+#  last updated 2025-11-22
+#
+#  Modes (choose one):
+#    -c <branch>         create <branch> from current trunk/branch and switches to it
+#    -s <branch>         switch working copy to <branch>
+#    -m [target]         merge current branch → trunk (or → target branch)
+#    -p [source]         pull trunk (or source branch) → current branch
+#    -t                  switch working copy to trunk
+#    -d <branch>         delete remote branch <branch> (prompts)
+#    --diff A B          show a diff between refs A and B (each: trunk | branch)
+#    (no option)         list trunk and branches
+#
+#  Other:
+#    -h, --help          show this help
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+shopt -s extglob
+
+die() { echo "svn-branch: $*" >&2; exit 1; }
+
+# Capture the real file path so the help text works from anywhere
+SCRIPT_FILE="${BASH_SOURCE[0]}"
+SCRIPT_FILE="$(readlink -f -- "$SCRIPT_FILE")"
+
+usage() {
+  awk '
+    /^# -/ {                 # first dashed line -> start printing
+      if (seen) { exit }     # second dashed line -> stop
+      seen = 1; next
+    }
+    seen && /^#/ {sub(/^# ?/, ""); print}
+  ' "$SCRIPT_FILE"
+}
+
+##############################################################################
+#  Locate repo context
+##############################################################################
+REPO_ROOT=$(svn info --show-item repos-root-url 2>/dev/null) \
+  || die "Not an SVN working copy."
+WC_URL=$(svn info --show-item url)
+WC_PATH=$PWD
+
+if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+  BRANCHES_URL="${WC_URL%%/trunk*}/branches"
+elif [[ "$WC_URL" =~ (/branches)(/|$) ]]; then
+  BRANCHES_URL="${WC_URL%%/branches/*}/branches"
+else
+  BRANCHES_URL="${REPO_ROOT}/branches"
+fi
+
+# Canonical trunk URL for this repository
+if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+  TRUNK_URL="${WC_URL%%/trunk*}/trunk"
+elif [[ "$WC_URL" =~ (/branches)(/|$) ]]; then
+  TRUNK_URL="${WC_URL%%/branches/*}/trunk"
+else
+  TRUNK_URL="${REPO_ROOT}/trunk"
+fi
+
+CURRENT_BRANCH=""
+[[ "$WC_URL" =~ /branches/([^/]+) ]] && CURRENT_BRANCH="${BASH_REMATCH[1]}"
+
+# helper: map "trunk" or branch name -> absolute URL, verifying existence
+ref_to_url() {
+  local ref="$1" url
+  if [[ "$ref" == "trunk" ]]; then
+    url="$TRUNK_URL"
+  else
+    url="${BRANCHES_URL}/${ref}"
+  fi
+  svn info "$url" &>/dev/null || die "Ref '$ref' not found at $url."
+  printf '%s\n' "$url"
+}
+
+##############################################################################
+#  Option parsing
+##############################################################################
+CREATE=0 SWITCH=0 MERGE=0 PULL=0 TRUNK=0 DELETE=0 DIFF=0
+NEWBR="" SWITCH_TO="" MERGE_TO="" PULL_FROM="" DELBR=""
+DIFF_A="" DIFF_B=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -c) CREATE=1; [[ ${2:-} ]] || die "-c needs a branch name"; NEWBR=$2; shift ;;
+    -s) SWITCH=1; [[ ${2:-} ]] || die "-s needs a branch name"; SWITCH_TO=$2; shift ;;
+    -m) MERGE=1;  [[ ${2:-} != @(-*) && ${2:-} ]] && MERGE_TO=$2 && shift ;;
+    -p) PULL=1;   [[ ${2:-} != @(-*) && ${2:-} ]] && PULL_FROM=$2 && shift ;;
+    -t|--trunk) TRUNK=1 ;;
+    -d) DELETE=1; [[ ${2:-} ]] || die "-d needs a branch name"; DELBR=$2; shift ;;
+    --diff)
+      DIFF=1
+      [[ ${2:-} && ${3:-} ]] || die "--diff needs two refs (trunk or branch names)"
+      DIFF_A=$2; DIFF_B=$3; shift 2
+      ;;
+    *)  die "Unknown option '$1'.  See -h." ;;
+  esac
+  shift
+done
+
+(( CREATE + SWITCH + MERGE + PULL + TRUNK + DELETE + DIFF <= 1 )) \
+  || die "Choose only one of -c, -s, -m, -p, -t, -d, or --diff."
+
+##############################################################################
+#  Helper: insist on a clean working copy
+##############################################################################
+require_clean_wc() {
+  local dirty
+  dirty=$(svn status)
+  if [[ -n "$dirty" ]]; then
+    echo "Working copy is not clean; offending lines:" >&2
+    echo "$dirty" >&2
+    die "Commit, revert, or ignore the above changes first."
+  fi
+}
+
+##############################################################################
+#  TRUNK mode
+##############################################################################
+if (( TRUNK )); then
+  require_clean_wc
+  if [[ "$WC_URL" =~ (/trunk)(/|$) ]]; then
+    echo "✅  Already on trunk."
+  else
+    svn switch "$TRUNK_URL" "$WC_PATH" || die "svn switch failed."
+    echo "✅  Now on trunk."
+  fi
+  exit 0
+fi
+
+##############################################################################
+#  SWITCH mode
+##############################################################################
+if (( SWITCH )); then
+  DEST="${BRANCHES_URL}/${SWITCH_TO}"
+  svn info "$DEST" &>/dev/null || die "Branch '$SWITCH_TO' does not exist."
+  require_clean_wc
+  svn switch "$DEST" "$WC_PATH" || die "svn switch failed."
+  echo "✅  Now on branch '$SWITCH_TO'."
+  exit 0
+fi
+
+##############################################################################
+#  CREATE mode
+##############################################################################
+if (( CREATE )); then
+  DEST="${BRANCHES_URL}/${NEWBR}"
+  svn info "$DEST" &>/dev/null && die "Branch '$NEWBR' already exists."
+  require_clean_wc
+  svn copy "$WC_URL" "$DEST" -m "Create branch $NEWBR" || die "svn copy failed."
+  svn switch "$DEST" "$WC_PATH" || die "svn switch failed."
+  echo "✅  Created and switched to '$NEWBR'."
+  exit 0
+fi
+
+##############################################################################
+#  MERGE mode
+##############################################################################
+if (( MERGE )); then
+  [[ -n "$CURRENT_BRANCH" ]] || die "You are on trunk; nothing to merge."
+  require_clean_wc
+  if [[ -z "$MERGE_TO" ]]; then
+    DEST="$TRUNK_URL"
+    TARGET="trunk"
+  else
+    DEST="${BRANCHES_URL}/${MERGE_TO}"
+    TARGET="branch '$MERGE_TO'"
+    svn info "$DEST" &>/dev/null || die "Target $TARGET does not exist."
+  fi
+  read -rp "Merge current branch → $TARGET? [y/N] " yn
+  [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+  SRC="$WC_URL"
+  svn switch "$DEST" "$WC_PATH" || die "svn switch failed."
+  svn merge "$SRC" "$WC_PATH" || die "svn merge failed."
+  echo "✅  Merge complete.  Review & commit."
+  exit 0
+fi
+
+##############################################################################
+#  PULL mode
+##############################################################################
+if (( PULL )); then
+  require_clean_wc
+  if [[ -z "$PULL_FROM" ]]; then
+    SRC="$TRUNK_URL"
+    LABEL="trunk"
+  else
+    SRC="${BRANCHES_URL}/${PULL_FROM}"
+    LABEL="branch '$PULL_FROM'"
+    svn info "$SRC" &>/dev/null || die "Source $LABEL does not exist."
+  fi
+  [[ "$SRC" == "$WC_URL" ]] && die "Source and destination are the same."
+  read -rp "Pull $LABEL into current branch? [y/N] " yn
+  [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+  svn merge "$SRC" "$WC_PATH" || die "svn merge failed."
+  echo "✅  Pull complete.  Review & commit."
+  exit 0
+fi
+
+##############################################################################
+#  DELETE mode
+##############################################################################
+if (( DELETE )); then
+  # Defensive: simple branch name only (matches prior delete safety)
+  [[ "$DELBR" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid branch name '$DELBR'."
+  [[ "$DELBR" != "trunk" ]] || die "Refusing to delete 'trunk'."
+
+  DEST="${BRANCHES_URL}/${DELBR}"
+  svn info "$DEST" &>/dev/null || die "Branch '$DELBR' does not exist."
+
+  if [[ "$CURRENT_BRANCH" == "$DELBR" ]]; then
+    require_clean_wc
+    echo "You are currently on branch '$DELBR'."
+    read -rp "Switch to trunk before deleting? [y/N] " yn
+    [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+    svn switch "$TRUNK_URL" "$WC_PATH" || die "svn switch to trunk failed."
+    echo "🡒 Switched to trunk."
+  fi
+
+  read -rp "Permanently delete remote branch '$DELBR'? [y/N] " yn
+  [[ ${yn:-n} =~ ^[Yy]$ ]] || die "Aborted."
+
+  svn delete "$DEST" -m "Delete branch $DELBR" || die "svn delete failed."
+  echo "✅  Deleted remote branch '$DELBR'."
+  exit 0
+fi
+
+##############################################################################
+#  DIFF mode
+##############################################################################
+if (( DIFF )); then
+  # Map refs -> URLs (validates existence)
+  URL_A=$(ref_to_url "$DIFF_A")
+  URL_B=$(ref_to_url "$DIFF_B")
+
+  if [[ "$URL_A" == "$URL_B" ]]; then
+    echo "Both refs resolve to the same URL:"
+    echo "  $URL_A"
+    echo "Nothing to diff."
+    exit 0
+  fi
+
+  echo "🧾 Diff between '$DIFF_A' and '$DIFF_B':"
+  echo "    $URL_A"
+  echo "    $URL_B"
+  # Plain unified diff (server-side); no working copy changes required.
+  svn diff "$URL_A" "$URL_B" || die "svn diff failed."
+  exit 0
+fi
+
+
+##############################################################################
+#  LIST mode (default)
+##############################################################################
+
+# Figure out what we're currently on (trunk or a branch under $BRANCHES_URL)
+CURRENT_URL=$(svn info --show-item url 2>/dev/null || true)
+CURRENT_REF=""
+
+if [[ -n "$CURRENT_URL" ]]; then
+  # Normalize to avoid trailing slashes
+  NORM_URL=${CURRENT_URL%/}
+  NORM_BRANCHES_URL=${BRANCHES_URL%/}
+
+  # Assume standard layout: .../trunk and .../branches/<branch>
+  # If we're on trunk (sibling of branches/)
+  if [[ "$NORM_URL" == "${NORM_BRANCHES_URL%/branches}/trunk" ]]; then
+    CURRENT_REF="trunk"
+  else
+    # If we're on some branch under BRANCHES_URL, extract its name
+    case "$NORM_URL" in
+      "$NORM_BRANCHES_URL"/*)
+        CURRENT_REF=${NORM_URL#"$NORM_BRANCHES_URL"/}
+        CURRENT_REF=${CURRENT_REF%%/*}   # only first path component
+        ;;
+    esac
+  fi
+fi
+
+echo "Branches in $BRANCHES_URL:"
+
+# First, show trunk as if it were a branch, with asterisk if current
+if [[ "$CURRENT_REF" == "trunk" ]]; then
+  echo "trunk *"
+else
+  echo "trunk"
+fi
+
+# Then list remote branches and mark the current one with an asterisk
+svn ls "$BRANCHES_URL" 2>/dev/null \
+  | sed 's:/*$::' \
+  | while read -r BRANCH_NAME
+do
+  [[ -z "$BRANCH_NAME" ]] && continue
+
+  if [[ "$BRANCH_NAME" == "$CURRENT_REF" ]]; then
+    echo "$BRANCH_NAME *"
+  else
+    echo "$BRANCH_NAME"
+  fi
+done

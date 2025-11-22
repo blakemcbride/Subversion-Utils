@@ -1,0 +1,7 @@
+#
+if [ $# -eq 1 ]; then
+	svn list svn://svn.arahant.com/Arahant/$1
+else
+	svn list svn://svn.arahant.com/Arahant
+fi
+
