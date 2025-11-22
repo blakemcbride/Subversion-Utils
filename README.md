@@ -4,6 +4,8 @@ This repository contains a collection of Bash utilities designed to simplify and
 
 These utilities were designed to be used with bash under Linux.  They may work elsewhere.
 
+All of the commands have a `-h` option to display a help message.
+
 ---
 
 ## Included Commands
