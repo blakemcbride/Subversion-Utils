@@ -1,7 +1,91 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+#  svn-list  —  display repository layout (trunk / branches / tags)
 #
-if [ $# -eq 1 ]; then
-	svn list svn://svn.arahant.com/Arahant/$1
-else
-	svn list svn://svn.arahant.com/Arahant
+#  Usage:
+#    svn-list
+#
+#  Run from anywhere inside an SVN working copy. It will:
+#    - Detect the repository root and current URL
+#    - Infer the "project root" that contains trunk/branches/tags
+#    - Show the trunk path and list branches and tags (if they exist)
+#
+# ---------------------------------------------------------------------------
+
+set -euo pipefail
+
+die() {
+    echo "svn-list: $*" >&2
+    exit 1
+}
+
+# Ensure we're in an SVN working copy
+if ! info=$(svn info 2>/dev/null)
+then
+    die "not an SVN working copy (svn info failed)"
 fi
 
+repo_root=$(printf '%s\n' "$info" | awk -F': ' '$1=="Repository Root"{print $2}')
+url=$(printf '%s\n' "$info" | awk -F': ' '$1=="URL"{print $2}')
+
+if [ -z "${repo_root:-}" ] || [ -z "${url:-}" ]
+then
+    die "unable to determine Repository Root or URL from svn info"
+fi
+
+# Infer the project root that should contain trunk/branches/tags
+project="$url"
+case "$project" in
+    */trunk)
+        project=${project%/trunk}
+        ;;
+    */branches/*)
+        project=${project%/branches/*}
+        ;;
+    */tags/*)
+        project=${project%/tags/*}
+        ;;
+esac
+
+# For display, compute project path relative to repo root, no leading slash
+rel="${project#$repo_root}"
+project_display="${rel#/}"   # strip a possible leading "/"
+
+trunk_url="$project/trunk"
+branches_url="$project/branches"
+tags_url="$project/tags"
+
+echo "Repository root: $repo_root"
+echo "Project root:    $project_display"
+echo
+echo "Layout:"
+
+# trunk
+if svn info "$trunk_url" >/dev/null 2>&1
+then
+    echo "  trunk:   trunk"
+else
+    echo "  trunk:   (missing)"
+fi
+
+# branches
+echo "  branches:"
+if svn list "$branches_url" >/dev/null 2>&1
+then
+    svn list "$branches_url" \
+        | sed 's:/$::' \
+        | sed 's/^/    /'
+else
+    echo "    (none)"
+fi
+
+# tags
+echo "  tags:"
+if svn list "$tags_url" >/dev/null 2>&1
+then
+    svn list "$tags_url" \
+        | sed 's:/$::' \
+        | sed 's/^/    /'
+else
+    echo "    (none)"
+fi
