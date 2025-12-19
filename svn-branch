@@ -262,22 +262,18 @@ CURRENT_URL=$(svn info --show-item url 2>/dev/null || true)
 CURRENT_REF=""
 
 if [[ -n "$CURRENT_URL" ]]; then
-  # Normalize to avoid trailing slashes
   NORM_URL=${CURRENT_URL%/}
+  NORM_TRUNK_URL=${TRUNK_URL%/}
   NORM_BRANCHES_URL=${BRANCHES_URL%/}
 
-  # Assume standard layout: .../trunk and .../branches/<branch>
-  # If we're on trunk (sibling of branches/)
-  if [[ "$NORM_URL" == "${NORM_BRANCHES_URL%/branches}/trunk" ]]; then
+  # On trunk (either exactly trunk or anywhere under it)
+  if [[ "$NORM_URL" == "$NORM_TRUNK_URL" || "$NORM_URL" == "$NORM_TRUNK_URL/"* ]]; then
     CURRENT_REF="trunk"
-  else
-    # If we're on some branch under BRANCHES_URL, extract its name
-    case "$NORM_URL" in
-      "$NORM_BRANCHES_URL"/*)
-        CURRENT_REF=${NORM_URL#"$NORM_BRANCHES_URL"/}
-        CURRENT_REF=${CURRENT_REF%%/*}   # only first path component
-        ;;
-    esac
+
+  # On a branch (either exactly branch root or anywhere under it)
+  elif [[ "$NORM_URL" == "$NORM_BRANCHES_URL/"* ]]; then
+    CURRENT_REF=${NORM_URL#"$NORM_BRANCHES_URL"/}
+    CURRENT_REF=${CURRENT_REF%%/*}   # only first path component
   fi
 fi
 
