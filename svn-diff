@@ -6,20 +6,15 @@
 #    • Sends the diff through less (-F -R -S) when stdout is a terminal.
 #    • If exactly one argument looks like a single revision (12345 or r12345)
 #      it is treated as “-c <REV>”.
-#    • -h / --help prints this help text and exits cleanly.
-#
-#  Quick examples
-#    svn-diff                     diff working copy, paged
-#    svn-diff 10572               patch for r10572        (implicit -c)
-#    svn-diff -c 10572            patch for r10572        (explicit)
-#    svn-diff -r 120:125          all changes between r120 and r125
-#    svn-diff -r PREV:HEAD .      diff between last commit and HEAD
-#    svn-diff -h                  show help
-#
-#  less flags
-#    -F  quit if output fits on one screen
-#    -R  pass ANSI colour codes through
-#    -S  disable line wrapping (scroll horizontally)
+#    • If exactly one argument is "trunk" or a branch name, it diffs
+#      that repo ref against your local working copy:
+#         svn-diff trunk
+#         svn-diff my-branch
+#    • NEW OPTION: --reverse (or -V) reverses the comparison for URL-vs-local:
+#         svn-diff --reverse trunk
+#         svn-diff -V my-branch
+#      (i.e., local working copy → repo ref)
+#    • -h / --help prints help text and exits cleanly.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -32,41 +27,144 @@ show_help() {
 svn-diff — pager-friendly wrapper around “svn diff”
 
 USAGE
-  svn-diff [svn diff options]               # behaves like svn diff, but paged
-  svn-diff REV                              # same as: svn diff -c REV
-  svn-diff -h | --help                      # show this help
+  svn-diff [svn diff options]
+      Behaves like "svn diff", but automatically pages output when appropriate.
 
-VIEWING RANGES OF REVISIONS
-  To see changes between multiple consecutive revisions, use the standard
-  Subversion range syntax with -r:
+  svn-diff REV
+      Show the patch for a single revision.
+      Equivalent to: svn diff -c REV
+
+      REV may be written as:
+        10572
+        r10572
+
+  svn-diff trunk
+      Diff the repository trunk against your local working copy.
+      Equivalent to: svn diff <project-base>/trunk .
+
+  svn-diff <branch>
+      Diff the specified repository branch against your local working copy.
+      Equivalent to: svn diff <project-base>/branches/<branch> .
+
+  svn-diff --reverse trunk
+  svn-diff --reverse <branch>
+      Reverse the comparison direction for trunk/branch mode:
+        normal:   svn diff <URL> .
+        reverse:  svn diff . <URL>
+
+OPTIONS
+  -V, --reverse
+      Reverse comparison direction for the "trunk" / "<branch>" shorthand.
+      (Has no effect on other svn diff usages; those are passed through.)
+
+  -h, --help
+      Show this help text and exit.
+
+-----------------------------------------------------------------------
+
+COMMON EXAMPLES
+
+  svn-diff
+      Diff your local working copy (paged if output is long).
+
+  svn-diff 10572
+      Show the patch introduced by revision 10572.
+
+  svn-diff -r 120:125
+      Show cumulative changes from revision 120 through 125.
+
+  svn-diff trunk
+      Show how your working copy differs from trunk.
+
+  svn-diff -V trunk
+      Show trunk as differing from your working copy (reversed +/−).
+
+  svn-diff multitenant
+      Show how your working copy differs from branches/multitenant.
+
+  svn-diff -V multitenant
+      Reverse the diff direction for branches/multitenant vs your WC.
+
+-----------------------------------------------------------------------
+
+REVISION RANGES
+
+  To compare multiple revisions, use Subversion’s standard -r syntax:
 
       svn-diff -r <START>:<END> [PATH]
 
   Examples
-      svn-diff -r 120:125           # cumulative diff from r120 → r125
-      svn-diff -r PREV:HEAD .       # changes since the previous commit
-      svn-diff -r 0:HEAD file.txt   # full history of one file
+      svn-diff -r 120:125
+      svn-diff -r PREV:HEAD .
+      svn-diff -r 0:HEAD file.txt
 
-FEATURES
-  • Sends output through “less -F -R -S” when writing to a TTY.
-  • A lone numeric argument (optionally prefixed with “r”) is treated as
-    a single-revision diff:   svn-diff 10572  ≡  svn diff -c 10572
-  • All other arguments are passed unchanged to “svn diff”.
+-----------------------------------------------------------------------
+
+PAGING BEHAVIOR
+
+  When stdout is a terminal, output is sent through:
+
+      less -F -R -S
+
+    -F   Quit if output fits on one screen
+    -R   Preserve ANSI color codes
+    -S   Disable line wrapping (horizontal scrolling)
+
+  When stdout is not a terminal (e.g. piped to a file), paging is disabled.
+
+-----------------------------------------------------------------------
+
+IMPORTANT NOTES
+
+  • A single numeric argument is always treated as a revision number.
+  • A single non-numeric argument is treated as:
+        - "trunk", or
+        - a branch name under branches/<name>
+
+  This means:
+      svn-diff src
+
+  is interpreted as:
+      branches/src → local working copy
+
+  If you need to diff a local path explicitly, use:
+      svn-diff -- src
 
 EOF
 }
 
 ##############################################################################
-#  Detect -h / --help
+#  Parse wrapper-only options: -V / --reverse
+#  Stop at "--" so the rest is passed to svn diff unchanged.
 ##############################################################################
-for arg in "$@"; do
-  case "$arg" in
+reverse=0
+args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     -h|--help)
       show_help
       exit 0
       ;;
+    -V|--reverse)
+      reverse=1
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        args+=("$1")
+        shift
+      done
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
   esac
 done
+
+set -- "${args[@]}"
 
 ##############################################################################
 #  Implicit “-c REV” when a single numeric argument is supplied
@@ -74,6 +172,51 @@ done
 if [[ $# -eq 1 && "$1" != -* && "$1" =~ ^r?[0-9]+$ ]]; then
   rev=${1#r}           # strip leading 'r' if present
   set -- -c "$rev"
+fi
+
+##############################################################################
+#  trunk/branch shorthand:
+#    svn-diff trunk
+#    svn-diff <branch>
+#  (and reversed with -V/--reverse)
+##############################################################################
+if [[ $# -eq 1 && "$1" != -* && ! "$1" =~ ^r?[0-9]+$ ]]; then
+  ref=$1
+
+  wc_url=$(svn info --show-item url 2>/dev/null || true)
+  if [[ -z "$wc_url" ]]; then
+    echo "svn-diff: not a Subversion working copy (can't read working copy URL)" >&2
+    exit 2
+  fi
+
+  project_base=""
+
+  if [[ "$wc_url" == */trunk ]]; then
+    project_base=${wc_url%/trunk}
+  elif [[ "$wc_url" == */branches/* ]]; then
+    project_base=${wc_url%%/branches/*}
+  elif [[ "$wc_url" == */tags/* ]]; then
+    project_base=${wc_url%%/tags/*}
+  fi
+
+  if [[ -z "$project_base" ]]; then
+    echo "svn-diff: can't infer project base from URL: $wc_url" >&2
+    echo "svn-diff: expected URL ending in /trunk or containing /branches/ or /tags/" >&2
+    exit 2
+  fi
+
+  if [[ "$ref" == "trunk" ]]; then
+    target_url="${project_base}/trunk"
+  else
+    target_url="${project_base}/branches/${ref}"
+  fi
+
+  # Reverse changes sign by swapping arguments.
+  if [[ $reverse -eq 1 ]]; then
+    set -- . "$target_url"
+  else
+    set -- "$target_url" .
+  fi
 fi
 
 ##############################################################################
